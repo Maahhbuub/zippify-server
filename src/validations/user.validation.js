@@ -54,7 +54,7 @@ const resetPasswordSchema = z.object({
     body: z.object({
         password: z
             .string({ required_error: "Password is required" })
-            .min(8, "Password must be at least 8 characters"), // match whatever rule your createUserSchema already uses
+            .min(6, "Password must be at least 6 characters"), // match whatever rule your createUserSchema already uses
     })
 });
 
