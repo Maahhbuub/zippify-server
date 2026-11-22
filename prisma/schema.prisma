@@ -28,10 +28,12 @@ model User {
 }
 
 model Session {
-  id           Int      @id @default(autoincrement())
-  refreshToken String   @unique
-  userId       Int
-  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  id                   Int       @id @default(autoincrement())
+  refreshToken         String    @unique
+  previousRefreshToken String?   @unique
+  rotatedAt            DateTime?
+  userId               Int
+  user                 User      @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   userAgent String?
   createdAt DateTime @default(now())
@@ -50,8 +52,7 @@ model Url {
 
   userId Int?
   user   User? @relation(fields: [userId], references: [id], onDelete: Cascade)
-  // we can use onDelete:SetNull if we don't wanna remove the links after deleting the user.
 
-  @@index([longUrl]) // speeds up to find the duplicate urls
-  @@index([userId]) // speeds up 'get all URLs for this user'
+  @@index([longUrl])
+  @@index([userId]) 
 }

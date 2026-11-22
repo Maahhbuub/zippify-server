@@ -58,7 +58,10 @@ const refreshAccessToken = async (req, res) => {
         });
     }
 
-    const { accessToken } = await refreshToken(incomingRefreshToken);
+    const { accessToken, refreshToken: newRefreshToken } = await refreshToken(incomingRefreshToken);
+
+    if (newRefreshToken) sendTokenCookies(res, newRefreshToken);
+
     return res.status(200).json({
         success: true,
         message: "Access token refreshed",

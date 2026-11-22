@@ -6,6 +6,16 @@ import { generateAccessToken, generateRefreshToken } from "../utils/generateToke
 import { generateToken } from "../utils/generateToken.js";
 import { sendVerificationEmail, sendPasswordResetEmail } from "./email.service.js";
 
+const GRACE_MS = 30 * 1000; // tolerance for concurrent refreshes (tabs, parallel requests)
+const REFRESH_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+const unauthorized = (message, code) => {
+    const error = new Error(message);
+    error.statusCode = 401;
+    if (code) error.code = code;
+    return error;
+};
+
 const registerUser = async ({ name, email, password }) => {
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) {
@@ -62,7 +72,7 @@ const loginUser = async ({ email, password, userAgent }) => {
             refreshToken,
             userId: user.id,
             userAgent,
-            expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+            expiresAt: new Date(Date.now() + REFRESH_TTL_MS),
         },
     });
 
@@ -104,8 +114,6 @@ const verifyEmail = async (token) => {
 
 const resendVerificationEmail = async (email) => {
     const user = await prisma.user.findUnique({ where: { email } });
-
-    // don't leak whether the email exists or is already verified
     if (!user || user.emailVerified) return;
 
     const verificationToken = generateToken();
@@ -163,36 +171,60 @@ const resetPassword = async (token, newPassword) => {
             resetPasswordExpiresAt: null,
         },
     });
-
-    // logout from all devices
     await prisma.session.deleteMany({ where: { userId: user.id } });
 };
 
 const logoutUser = async (refreshToken) => {
     if (!refreshToken) return;
-    await prisma.session.deleteMany({ where: { refreshToken } });
+    await prisma.session.deleteMany({
+        where: { OR: [{ refreshToken }, { previousRefreshToken: refreshToken }] },
+    });
 };
 
 const refreshToken = async (incomingRefreshToken) => {
     const decoded = jwt.verify(incomingRefreshToken, process.env.REFRESH_TOKEN_SECRET);
 
-    const session = await prisma.session.findUnique({ where: { refreshToken: incomingRefreshToken } });
+    const session = await prisma.session.findFirst({
+        where: {
+            userId: decoded.id,
+            OR: [
+                { refreshToken: incomingRefreshToken },
+                { previousRefreshToken: incomingRefreshToken },
+            ],
+        },
+    });
 
-    if (!session || session.userId !== decoded.id) {
-        const error = new Error("Invalid refresh token");
-        error.statusCode = 401;
-        throw error;
-    }
+    if (!session) throw unauthorized("Invalid refresh token");
 
     if (session.expiresAt < new Date()) {
-        await prisma.session.delete({ where: { id: session.id } }); // clean up expired session
-        const error = new Error("Session expired, please log in again");
-        error.statusCode = 401;
-        throw error;
+        await prisma.session.delete({ where: { id: session.id } });
+        throw unauthorized("Session expired, please log in again");
     }
 
-    const accessToken = generateAccessToken(decoded.id);
-    return { accessToken };
+    if (session.refreshToken !== incomingRefreshToken) {
+        const withinGrace = session.rotatedAt && Date.now() - session.rotatedAt.getTime() < GRACE_MS;
+        if (!withinGrace) {
+            await prisma.session.delete({ where: { id: session.id } });
+            throw unauthorized("Session revoked", "TOKEN_REUSED");
+        }
+        return { accessToken: generateAccessToken(decoded.id), refreshToken: null };
+    }
+
+    const newRefreshToken = generateRefreshToken(decoded.id);
+    const { count } = await prisma.session.updateMany({
+        where: { id: session.id, refreshToken: incomingRefreshToken },
+        data: {
+            refreshToken: newRefreshToken,
+            previousRefreshToken: incomingRefreshToken,
+            rotatedAt: new Date(),
+            expiresAt: new Date(Date.now() + REFRESH_TTL_MS), // sliding expiry
+        },
+    });
+
+    if (count === 0) {
+        return { accessToken: generateAccessToken(decoded.id), refreshToken: null };
+    }
+    return { accessToken: generateAccessToken(decoded.id), refreshToken: newRefreshToken };
 };
 
 export {
